@@ -11,15 +11,6 @@ from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import BaggingRegressor
 import folium
 from folium import plugins
-import streamlit_folium as st_folium
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import Adam
-
-import lightning as L
-from torch.utils.data import TensorDataset, DataLoader
 
 st.set_page_config(page_title="Baltimore Crime", layout="wide")
 
