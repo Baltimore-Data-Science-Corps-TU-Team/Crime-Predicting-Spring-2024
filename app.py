@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
+import geopandas as gpd
 import numpy as np
+from sklearn.preprocessing import LabelEncoder
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
@@ -8,6 +10,8 @@ from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import BaggingRegressor
 import folium
+from folium import plugins
+import streamlit_folium as st_folium
 
 import torch
 import torch.nn as nn
@@ -64,10 +68,12 @@ with st.sidebar:
         placeholder="All"
     )
 
-    # display a multi-select box with all the neighborhoods in alphabetical order to select the different neighborhoods
+    # display a multi-select box to select the different neighborhoods
+    # sort the neighborhoods in alphabetical order
+    sortedNeighborhoods = sorted(list(crimeData['Neighborhood'].unique()))
     selectedNeighborhood = st.multiselect(
         "Select Neighborhoods",
-        list(crimeData['Neighborhood'].unique()),
+        sortedNeighborhoods,
         placeholder="All"
     )
 
@@ -86,21 +92,6 @@ filteredCrimeData = crimeData["Description"].str.contains("|".join(selectedCrime
                 crimeData["Race"].str.contains("|".join(selectedRace)) & \
                     crimeData["CrimeDateTime"].between(pd.to_datetime(selectedDate[0]), pd.to_datetime(selectedDate[1]))
 
-allTab, predTab = st.tabs(["All Crime", "Predictions"])
-
-with allTab:
-    st.caption("Takes into account all the filters")
-    st.metric(label="Total Crime", value=crimeData[filteredCrimeData].shape[0])
-
-
-with predTab:
-    # display a select box to select the machine learning model
-    # selectedModel = st.selectbox(
-    #     "Select Machine Learning Model",
-    #     ["Random Forest", "Extra Trees", "Decision Tree", "Baggin Regressor"],
-    # )
-    st.header("Decision Tree Model Predictions")
-
 # ------------------------- Machine Learning -------------------------
 def predictDatesModel(crimeData):
     # create a new dataframe with a 'CrimeDateTime' column that is converted to datetime and sorted from latest to oldest
@@ -108,6 +99,9 @@ def predictDatesModel(crimeData):
     crimeDataML['CrimeDateTime'] = pd.to_datetime(crimeData['CrimeDateTime'])
     crimeDataML = crimeDataML.sort_values('CrimeDateTime', ascending=True)
     crimeDataML['TimeDiff'] = crimeDataML['CrimeDateTime'].diff().dt.seconds.div(60).fillna(0) # in minutes
+
+    if (crimeDataML.shape[0] < 115):
+        return
     
      # loop through the data and calculate the time difference between each crime
     for i in range(1, 51):
@@ -153,9 +147,9 @@ def predictDatesModel(crimeData):
 
     return predCrimeTimes
 
-predictedDates = pd.DataFrame()
-if (crimeData[filteredCrimeData].shape[0] > 100):
-    predictedDates = predictDatesModel(crimeData[filteredCrimeData])
+predictedDates = predictDatesModel(crimeData[filteredCrimeData])
+if predictedDates is not None:
+    predictedDates = predictedDates[['CrimeDateTime']]
 
 def locationsModel(crimeData):
 
@@ -207,15 +201,10 @@ def locationsModel(crimeData):
     model.fit(X_train, y_train)
 
     return model
-
-if (crimeData[filteredCrimeData].shape[0] > 0):
+if predictedDates is not None:
     model = locationsModel(crimeData[filteredCrimeData])
-else:
-    st.toast("To predict future crime locations adjust filters to have more than 100 crimes")
 
 def predictLocationsModel(predictedDates, model):
-    predictedDates = predictedDates[['CrimeDateTime']]
-
     predictedData = predictedDates.copy()
     predictedData['Year'] = predictedData['CrimeDateTime'].dt.year
     predictedData['Month'] = predictedData['CrimeDateTime'].dt.month
@@ -246,8 +235,111 @@ def predictLocationsModel(predictedDates, model):
     predicted['latitude'] = model.predict(predictedData)[:, 0]
     predicted['longitude'] = model.predict(predictedData)[:, 1]
 
-    with predTab:
+    return predicted
 
+def predictTotalCrimesModel(crimeData):
+    
+    # group the data by month
+    crimeDataML = crimeData['CrimeDateTime'].value_counts().resample('M').sum().reset_index()
+
+    if (crimeDataML.shape[0] < 12):
+        return 0
+
+    # loop through the data and create 10 columns for each previous month to predict the next month
+    for i in range(1, 11):
+        crimeDataML[f'CrimeCount-{i}-Back'] = crimeDataML['count'].shift(i)
+
+    # drop the rows with NaN values
+    crimeDataML = crimeDataML.dropna()
+
+    # create a linear regression model
+    x1, x2, x3, x4, x5, x6, x7, x8, x9, x10 = [np.array(crimeDataML[f'CrimeCount-{i}-Back']).reshape(-1, 1) for i in range(1, 11)]
+    y = np.array(crimeDataML['count']).reshape(-1, 1)
+
+    X = np.concatenate((x1, x2, x3, x4, x5, x6, x7, x8, x9, x10), axis=1)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=13)
+
+    # create a linear regression model
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+
+    # predict the next month
+    nextMonth = model.predict(X)[-1][0]
+
+    return nextMonth.astype(int)
+# ------------------------- Machine Learning -------------------------
+
+def displayNeighborhoodMap(crimeData):
+
+    # group the data by neighborhood
+    neighborhoodData = crimeData.groupby('Neighborhood').size().reset_index(name='CrimeCount')
+
+    # read the shapefile of the neighborhoods
+    neighborhoods = gpd.read_file('Neighborhood.geojson')
+
+    # convert the neighborhood names to uppercase
+    neighborhoods['Name'] = neighborhoods['Name'].str.upper()
+
+    # merge the neighborhood data with the shapefile by 
+    neighborhoodData = neighborhoods.merge(neighborhoodData, left_on='Name', right_on='Neighborhood', how='left')
+
+    # create a map of the neighborhoods
+    neighborhoodMap = folium.Map(location=[neighborhoodData['geometry'].centroid.y.mean(), neighborhoodData['geometry'].centroid.x.mean()], zoom_start=12)
+
+    # add the neighborhood data to the map
+    cp = folium.Choropleth(
+        geo_data=neighborhoodData,
+        name='choropleth',
+        data=neighborhoodData,
+        columns=['Name', 'CrimeCount'],
+        key_on='feature.properties.Name',
+        fill_color='YlOrRd',
+        fill_opacity=0.7,
+        line_opacity=0.2,
+        legend_name='Number of Crimes',
+        highlight=True
+    ).add_to(neighborhoodMap)
+
+    neigborhoodDataIndexed = neighborhoodData.set_index('Name')
+
+    # add the neighborhood names to the map
+    for n in cp.geojson.data['features']:
+        n['properties']['CrimeCount'] = neigborhoodDataIndexed.loc[n['properties']['Name']]['CrimeCount']
+
+    folium.GeoJsonTooltip(fields=['Name', 'CrimeCount']).add_to(cp.geojson)
+
+    neighborhoodMap.save('neighborhood_map.html')
+    st.components.v1.html(open('neighborhood_map.html', 'r').read(), height=600)
+
+actualTab, predTab = st.tabs(["Actual Crime", "Predicted Crime"])
+
+with actualTab:
+    st.metric(label="Total Crime", value=crimeData[filteredCrimeData].shape[0])
+
+    # display the map of the neighborhoods
+    st.header("Neighborhood Map")
+    st.write("The map below shows the number of crimes in each neighborhood")
+    displayNeighborhoodMap(crimeData[filteredCrimeData])
+
+
+with predTab:
+    # display a select box to select the machine learning model
+    # selectedModel = st.selectbox(
+    #     "Select Machine Learning Model",
+    #     ["Random Forest", "Extra Trees", "Decision Tree", "Baggin Regressor"],
+    # )
+    nextMonth = predictTotalCrimesModel(crimeData[filteredCrimeData])
+    if nextMonth == 0:
+        st.error("Not enough data to predict the next month's total crime")
+    else:
+        st.metric(label="This Month's Total Predicted Crime", value=nextMonth)
+
+    st.header("Decision Tree Model Predictions")
+
+    if predictedDates is None:
+        st.error("Not enough data to predict the next 50 crimes")
+    else:
         col1, col2 = st.columns([1, 4])
         with col1:
             st.write("Next 50 Predicted Crime Dates and Times")
@@ -255,10 +347,11 @@ def predictLocationsModel(predictedDates, model):
             
 
         with col2:
+            predictedLocations = predictLocationsModel(predictedDates, model)
             st.write("Next 50 Predicted Crime Locations")
-            crime_pred_map = folium.Map(location=[predicted['latitude'].mean(), predicted['longitude'].mean()], zoom_start=12)
+            crime_pred_map = folium.Map(location=[predictedLocations['latitude'].mean(), predictedLocations['longitude'].mean()], zoom_start=12)
 
-            for index, row in predicted.iterrows():
+            for index, row in predictedLocations.iterrows():
                 folium.Marker(
                     [row['latitude'], row['longitude']], 
                     radius=3,
@@ -269,5 +362,3 @@ def predictLocationsModel(predictedDates, model):
 
             crime_pred_map.save('crime_pred_map.html')
             st.components.v1.html(open('crime_pred_map.html', 'r').read(), height=600)
-
-predictLocationsModel(predictedDates, model)

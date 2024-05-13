@@ -27,11 +27,13 @@
 '''
 
 import pandas as pd
+import geopandas as gpd
 
 # Function to return a cleaned version of the crime data
 def clean_crime_data(crimeData):
 
-    # Focus on the following columns: 'CrimeDateTime', 'Description', 'Gender', 'Age', 'Race', 'Neighborhood', 'Latitude', 'Longitude', 'PremiseType'
+    # Focus on the following columns: 'CrimeDateTime', 'Description', 'Gender', 
+    # 'Age', 'Race', 'Neighborhood', 'Latitude', 'Longitude', 'PremiseType'
     crimeData = crimeData.iloc[:, [4, 6, 10, 11, 12, 17, 18, 19, 21]]
 
     # Function to remove rows with dates that are not in 2020, 2021, or 2022
@@ -53,7 +55,8 @@ def clean_crime_data(crimeData):
     # Function to clean the 'Gender' column
     def clean_gender_column(data):
         # Get unique values in the 'Gender' column
-        unique_values = ['B', 'Transgende', 'N', ',', 'FB', 'O', '160', 'FW', 'FU', 'D', '60', '120', '8', 'MB', 'A', '77', '17', 'FF', '165', 'FM', '042819', 'S', 'T', '50']
+        unique_values = ['B', 'Transgende', 'N', ',', 'FB', 'O', '160', 'FW', 'FU', 'D', '60', '120', '8', 
+                         'MB', 'A', '77', '17', 'FF', '165', 'FM', '042819', 'S', 'T', '50']
         
         # Create a dictionary to map unique values to 'U' except for 'M' and 'F'
         replace_dict = {value: 'U' for value in unique_values if value not in ['Male', 'Female', 'W', 'M\\']}
@@ -100,11 +103,22 @@ def clean_crime_data(crimeData):
     
     # Function to clean the neighborhood column
     def clean_neighborhood_column(data):
-        # remove rows with NaN values in the 'Neighborhood' column
-        cleaned_data = data.dropna(subset=['Neighborhood'])
+        # empty the Neighborhood column
+        cleaned_data = data.drop(columns=['Neighborhood'])
+
+        # create a new column 'Neighborhood' using the neighborhood shapefile
+        # load the neighborhood shapefile
+        neighborhoods = gpd.read_file("Neighborhood.geojson")
+        # create a new column 'Neighborhood' by mapping the 'Latitude' and 'Longitude' columns to the neighborhood shapefile
+        cleaned_data['Neighborhood'] = gpd.points_from_xy(data['Longitude'], data['Latitude']).map(
+            lambda x: neighborhoods[neighborhoods.contains(x)]['Name'].values[0] if len(neighborhoods[neighborhoods.contains(x)]) > 0 else 'UNKNOWN')
+        
+        # drop the 'UNKNOWN' rows
+        cleaned_data = cleaned_data[cleaned_data['Neighborhood'] != 'UNKNOWN']
 
         # make the neighborhood values uppercase
         cleaned_data['Neighborhood'] = cleaned_data['Neighborhood'].str.upper()
+
         return cleaned_data
     
     # Function to remove rows with NaN and 0 values in the 'Longitude' and 'Latitude' column
@@ -128,8 +142,8 @@ def clean_crime_data(crimeData):
     crimeData['Gender'] = clean_gender_column(crimeData['Gender'])
     crimeData['Age'] = clean_age_column(crimeData['Age'])
     crimeData['Race'] = clean_race_column(crimeData['Race'])
-    crimeData = clean_neighborhood_column(crimeData)
     crimeData = delete_invalid_location_rows(crimeData)
+    crimeData = clean_neighborhood_column(crimeData)
     crimeData['PremiseType'] = clean_premise_type_column(crimeData['PremiseType'])
 
     return crimeData
